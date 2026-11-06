@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Jun  9 09:15:57 2024
+
+@author: seydaakgun
+"""
+
+import numpy as np
+
+# Material properties for unidirectional graphite/epoxy
+E1 = 181e9  # Longitudinal modulus (Pa)
+E2 = 10.3e9  # Transverse modulus (Pa)
+G12 = 7.17e9  # Shear modulus (Pa)
+nu12 = 0.28  # Poisson's ratio
+
+# Calculate Poisson's ratio nu21
+nu21 = (nu12 * E2) / E1
+
+# Q matrix for a unidirectional lamina
+Q11 = E1 / (1 - nu12 * nu21)
+Q12 = (nu12 * E2) / (1 - nu12 * nu21)
+Q22 = E2 / (1 - nu12 * nu21)
+Q66 = G12
+
+Q = np.array([
+    [Q11, Q12, 0],
+    [Q12, Q22, 0],
+    [0, 0, Q66]
+])
+
+def transform_Q(Q, theta):
+    """Transform the Q matrix for a given angle theta."""
+    m = np.cos(np.radians(theta))
+    n = np.sin(np.radians(theta))
+    
+    T = np.array([
+        [m**2, n**2, 2*m*n],
+        [n**2, m**2, -2*m*n],
+        [-m*n, m*n, m**2 - n**2]
+    ])
+    
+    T_inv = np.linalg.inv(T)
+    Q_bar = T_inv @ Q @ T_inv.T
+    return Q_bar
+
+# Laminate layup definition
+angles = [0, 30, -45]
+thickness = 0.005  # Thickness of each ply (m)
+total_thickness = thickness * len(angles)
+
+# Calculate z values (distances from midplane)
+z = np.linspace(-total_thickness / 2, total_thickness / 2, len(angles) + 1)
+
+# Initialize A, B, D matrices
+A = np.zeros((3, 3))
+B = np.zeros((3, 3))
+D = np.zeros((3, 3))
+
+# Calculate A, B, D matrices
+for i, angle in enumerate(angles):
+    Q_bar = transform_Q(Q, angle)
+    A += Q_bar * (z[i+1] - z[i])
+    B += 0.5 * Q_bar * (z[i+1]**2 - z[i]**2)
+    D += (1/3) * Q_bar * (z[i+1]**3 - z[i]**3)
+
+# Applied loads
+Nx = 1000  # Load in x-direction (N/m)
+Ny = 1000  # Load in y-direction (N/m)
+Nxy = 0  # Shear load (N/m)
+
+N = np.array([Nx, Ny, Nxy])
+
+# Solve for midplane strains and curvatures
+ABD = np.block([
+    [A, B],
+    [B, D]
+])
+
+strain_curvature = np.linalg.inv(ABD) @ np.concatenate((N, np.zeros(3)))
+
+midplane_strains = strain_curvature[:3]
+curvatures = strain_curvature[3:]
+
+print("Midplane Strains:", midplane_strains)
+print("Curvatures:", curvatures)
+
+def global_stresses(Q_bar, midplane_strains, curvatures, z):
+    """Calculate global stresses in a ply."""
+    epsilon = midplane_strains + z * curvatures
+    sigma = Q_bar @ epsilon
+    return sigma
+
+# Calculate global and local stresses on the top surface of the 30° ply
+z_top_30 = z[1]
+Q_bar_30 = transform_Q(Q, 30)
+
+global_stress_30 = global_stresses(Q_bar_30, midplane_strains, curvatures, z_top_30)
+
+# Transform global stresses to local stresses
+T_30 = np.array([
+    [np.cos(np.radians(30))**2, np.sin(np.radians(30))**2, 2*np.sin(np.radians(30))*np.cos(np.radians(30))],
+    [np.sin(np.radians(30))**2, np.cos(np.radians(30))**2, -2*np.sin(np.radians(30))*np.cos(np.radians(30))],
+    [-np.sin(np.radians(30))*np.cos(np.radians(30)), np.sin(np.radians(30))*np.cos(np.radians(30)), (np.cos(np.radians(30))**2 - np.sin(np.radians(30))**2)]
+])
+
+local_stress_30 = T_30 @ global_stress_30
+
+print("Global Stress on 30° Ply:", global_stress_30)
+print("Local Stress on 30° Ply:", local_stress_30)
+
+# Calculate percentage of load Nx taken by each ply
+percentage_loads = []
+for i, angle in enumerate(angles):
+    Q_bar = transform_Q(Q, angle)
+    N_ply = Q_bar @ (midplane_strains + z[i+1] * curvatures)
+    percentage_loads.append(N_ply[0] / Nx * 100)
+
+print("Percentage of Load Nx taken by each ply:", percentage_loads)
+
+# Material strength properties for maximum stress theory
+Xt = 1500e6  # Tensile strength in fiber direction (Pa)
+Xc = -1200e6  # Compressive strength in fiber direction (Pa)
+Yt = 40e6  # Tensile strength transverse to fiber direction (Pa)
+Yc = -246e6  # Compressive strength transverse to fiber direction (Pa)
+S = 68e6  # Shear strength (Pa)
+
+def failure_mode(stress_local):
+    """Determine potential failure mode using maximum stress theory."""
+    sigma1, sigma2, tau12 = stress_local
+    if sigma1 > Xt:
+        return "Fiber tension failure"
+    elif sigma1 < Xc:
+        return "Fiber compression failure"
+    elif sigma2 > Yt:
+        return "Matrix tension failure"
+    elif sigma2 < Yc:
+        return "Matrix compression failure"
+    elif abs(tau12) > S:
+        return "Shear failure"
+    else:
+        return "No failure"
+
+failure_30 = failure_mode(local_stress_30)
+
+print("Potential failure mode in 30° ply:", failure_30)
